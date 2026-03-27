@@ -157,6 +157,25 @@ const dashboardHTML = `<!doctype html>
       border-radius: 16px;
       overflow: hidden;
     }
+	.tabs {
+	  display: flex;
+	  gap: 8px;
+	  margin: 0 0 12px;
+	}
+	.tab-btn {
+	  border: 1px solid var(--border);
+	  background: rgba(17, 24, 39, 0.88);
+	  color: var(--text);
+	  border-radius: 999px;
+	  padding: 7px 12px;
+	  cursor: pointer;
+	  font-size: 13px;
+	}
+	.tab-btn.active {
+	  border-color: var(--accent);
+	  color: var(--accent);
+	  background: rgba(56, 189, 248, 0.12);
+	}
     table {
       width: 100%;
       border-collapse: collapse;
@@ -280,14 +299,21 @@ const dashboardHTML = `<!doctype html>
 			  </div>
     </div>
 
+	<div class="tabs" id="tabs">
+	  <button class="tab-btn active" type="button" data-tab="all">All</button>
+	  <button class="tab-btn" type="button" data-tab="ingress">Ingress</button>
+	  <button class="tab-btn" type="button" data-tab="egress">Egress</button>
+	</div>
+
     <div class="table-wrap">
       <table>
         <thead>
           <tr>
             <th>Ifindex</th>
+	  <th>Direction</th>
 			<th>Src IP</th>
 			<th>Dst IP</th>
-	  <th>Dst Domain</th>
+	  <th>Domain</th>
             <th>Type</th>
             <th>Length</th>
             <th>Count</th>
@@ -298,7 +324,7 @@ const dashboardHTML = `<!doctype html>
           </tr>
         </thead>
         <tbody id="packetBody">
-	<tr><td class="empty" colspan="11">Waiting for packets...</td></tr>
+  <tr><td class="empty" colspan="12">Waiting for packets...</td></tr>
         </tbody>
       </table>
     </div>
@@ -315,10 +341,12 @@ const dashboardHTML = `<!doctype html>
 	const refreshStatus = document.getElementById('refreshStatus');
 	const pauseToggle = document.getElementById('pauseToggle');
 	const pauseLabel = document.getElementById('pauseLabel');
+	const tabs = document.getElementById('tabs');
 	pauseToggle.checked = true;
 	let isPaused = false;
 	let dirtyWhilePaused = false;
 	let renderTimer = null;
+	let activeTab = 'all';
 
     const escapeHTML = (value) => String(value ?? '')
       .replaceAll('&', '&amp;')
@@ -365,12 +393,15 @@ const dashboardHTML = `<!doctype html>
 
     const render = () => {
 	  const packets = [...rows.values()].sort((a, b) => (b.lastSeenUnix || 0) - (a.lastSeenUnix || 0));
-	  const visiblePackets = packets.slice(0, MAX_RENDER_ROWS);
-      uniqueCount.textContent = packets.length;
-      totalCount.textContent = packets.reduce((sum, packet) => sum + (packet.count || 0), 0);
+	  const filteredPackets = activeTab === 'all'
+		? packets
+		: packets.filter((packet) => packet.direction === activeTab);
+	  const visiblePackets = filteredPackets.slice(0, MAX_RENDER_ROWS);
+	  uniqueCount.textContent = filteredPackets.length;
+	  totalCount.textContent = filteredPackets.reduce((sum, packet) => sum + (packet.count || 0), 0);
 
 	  if (!visiblePackets.length) {
-		body.innerHTML = '<tr><td class="empty" colspan="11">Waiting for packets...</td></tr>';
+		body.innerHTML = '<tr><td class="empty" colspan="12">No packets for current tab.</td></tr>';
         return;
       }
 
@@ -385,6 +416,7 @@ const dashboardHTML = `<!doctype html>
 		return '' +
 		  '<tr>' +
 			'<td class="mono">' + escapeHTML(packet.ifindex) + '</td>' +
+			'<td><span class="tag">' + escapeHTML(packet.direction || '-') + '</span></td>' +
 			'<td class="mono">' + escapeHTML(packet.srcIP || '-') + '</td>' +
 			'<td class="mono">' + escapeHTML(packet.dstIP || '-') + '</td>' +
 			'<td class="mono">' + escapeHTML(packet.dstDomain || '-') + '</td>' +
@@ -424,6 +456,15 @@ const dashboardHTML = `<!doctype html>
     const source = new EventSource('/events');
     setConnection('connecting', 'Connecting...');
 	pauseToggle.addEventListener('change', () => setPause(!pauseToggle.checked));
+	tabs.addEventListener('click', (event) => {
+	  const btn = event.target.closest('.tab-btn');
+	  if (!btn) return;
+	  activeTab = btn.dataset.tab || 'all';
+	  for (const item of tabs.querySelectorAll('.tab-btn')) {
+		item.classList.toggle('active', item === btn);
+	  }
+	  scheduleRender();
+	});
 	body.addEventListener('change', async (event) => {
 	  const sw = event.target.closest('.drop-switch-input');
 	  if (!sw || sw.disabled) return;
@@ -483,6 +524,7 @@ type parsedPacket struct {
 
 type packetView struct {
 	ID           string    `json:"id"`
+	Direction    string    `json:"direction"`
 	Ifindex      uint32    `json:"ifindex"`
 	PacketLen    uint32    `json:"packetLen"`
 	CapturedLen  int       `json:"capturedLen"`
@@ -574,7 +616,7 @@ func (h *packetHub) resolveDomain(ip string) {
 }
 
 func (h *packetHub) upsert(packet packetView) {
-	packet.DstDomain = h.lookupDomain(packet.DstIP)
+	packet.DstDomain = h.lookupDomain(h.domainLookupIP(packet))
 
 	h.mu.Lock()
 	droppedCount := h.droppedDst[packet.DstIP]
@@ -748,6 +790,13 @@ func (h *packetHub) lookupDomain(dstIP string) string {
 	return ""
 }
 
+func (h *packetHub) domainLookupIP(packet packetView) string {
+	if packet.Direction == "ingress" {
+		return packet.SrcIP
+	}
+	return packet.DstIP
+}
+
 func (h *packetHub) evictOldestLocked() {
 	var (
 		oldestID   string
@@ -902,12 +951,12 @@ func main() {
 		defer ticker.Stop()
 
 		for range ticker.C {
-			s, err := formatCounters(objs.IngressPktCount, objs.EgressPktCount)
+			_, err := formatCounters(objs.IngressPktCount, objs.EgressPktCount)
 			if err != nil {
 				log.Printf("Error reading map: %s", err)
 				continue
 			}
-			log.Printf("Packet Count: %s", s)
+			//log.Printf("Packet Count: %s", s)
 		}
 	}()
 
@@ -930,10 +979,6 @@ func main() {
 		}
 
 		payload := capturedBytes(event)
-		if event.Direction != 2 {
-			continue
-		}
-
 		packet := buildPacketView(event, payload)
 		if event.Dropped != 0 {
 			hub.markDropped(packet.DstIP)
@@ -1062,8 +1107,10 @@ func handleDropDstIP(hub *packetHub, blockedDstV4 *ebpf.Map, w http.ResponseWrit
 func buildPacketView(event bpfEvent, payload []byte) packetView {
 	now := time.Now()
 	parsed := parsePacket(payload)
+	direction := directionString(event.Direction)
 	return packetView{
-		ID:           packetID(parsed),
+		ID:           packetID(direction, parsed),
+		Direction:    direction,
 		Ifindex:      event.Ifindex,
 		PacketLen:    event.PktLen,
 		CapturedLen:  len(payload),
@@ -1079,11 +1126,22 @@ func buildPacketView(event bpfEvent, payload []byte) packetView {
 	}
 }
 
-func packetID(parsed parsedPacket) string {
+func packetID(direction string, parsed parsedPacket) string {
 	if parsed.SrcIP != "" || parsed.DstIP != "" {
-		return parsed.SrcIP + "->" + parsed.DstIP
+		return direction + "|" + parsed.SrcIP + "->" + parsed.DstIP
 	}
-	return parsed.Summary
+	return direction + "|" + parsed.Summary
+}
+
+func directionString(direction uint8) string {
+	switch direction {
+	case 1:
+		return "ingress"
+	case 2:
+		return "egress"
+	default:
+		return fmt.Sprintf("unknown(%d)", direction)
+	}
 }
 
 func capturedBytes(event bpfEvent) []byte {

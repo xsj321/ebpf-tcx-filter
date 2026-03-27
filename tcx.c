@@ -49,7 +49,7 @@ struct {
 	__type(value, __u8);
 } blocked_dst_v4 SEC(".maps");
 
-static __always_inline int should_drop_egress_v4(struct __sk_buff *skb)
+static __always_inline int should_drop_v4(struct __sk_buff *skb)
 {
 	struct ethhdr eth;
 	struct iphdr iph;
@@ -112,6 +112,11 @@ static __always_inline void submit_skb_event(struct __sk_buff *skb, __u8 directi
 SEC("tc")
 int ingress_prog_func(struct __sk_buff *skb) {
 	__sync_fetch_and_add(&ingress_pkt_count, 1);
+	if (should_drop_v4(skb)) {
+		submit_skb_event(skb, DIRECTION_INGRESS, 1);
+		return TC_ACT_SHOT;
+	}
+
 	submit_skb_event(skb, DIRECTION_INGRESS, 0);
 	return TC_ACT_OK;
 }
@@ -119,7 +124,7 @@ int ingress_prog_func(struct __sk_buff *skb) {
 SEC("tc")
 int egress_prog_func(struct __sk_buff *skb) {
 	__sync_fetch_and_add(&egress_pkt_count, 1);
-	if (should_drop_egress_v4(skb)) {
+	if (should_drop_v4(skb)) {
 		submit_skb_event(skb, DIRECTION_EGRESS, 1);
 		return TC_ACT_SHOT;
 	}
