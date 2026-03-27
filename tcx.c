@@ -9,6 +9,7 @@ char __license[] SEC("license") = "Dual MIT/GPL";
 #define DIRECTION_EGRESS 2
 #define ETH_P_8021Q 0x8100
 #define ETH_P_8021AD 0x88A8
+#define ETH_P_IPV6 0x86DD
 
 struct __sk_buff {
 	__u32 len;
@@ -49,6 +50,13 @@ struct {
 	__type(value, __u8);
 } blocked_dst_v4 SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, __u8[16]);
+	__type(value, __u8);
+} blocked_dst_v6 SEC(".maps");
+
 static __always_inline int should_drop_v4(struct __sk_buff *skb)
 {
 	struct ethhdr eth;
@@ -57,6 +65,7 @@ static __always_inline int should_drop_v4(struct __sk_buff *skb)
 	__u32 l3_offset = sizeof(struct ethhdr);
 	__u8 vlan_hdr[4];
 	__u32 daddr;
+	__u8 daddr_v6[16];
 
 	if (bpf_skb_load_bytes(skb, 0, &eth, sizeof(eth)) < 0)
 		return 0;
@@ -70,17 +79,25 @@ static __always_inline int should_drop_v4(struct __sk_buff *skb)
 		l3_offset += sizeof(vlan_hdr);
 	}
 
-	if (ether_type != ETH_P_IP)
-		return 0;
+	if (ether_type == ETH_P_IP) {
+		if (bpf_skb_load_bytes(skb, l3_offset, &iph, sizeof(iph)) < 0)
+			return 0;
 
-	if (bpf_skb_load_bytes(skb, l3_offset, &iph, sizeof(iph)) < 0)
-		return 0;
+		if (iph.version != 4)
+			return 0;
 
-	if (iph.version != 4)
-		return 0;
+		daddr = __builtin_bswap32(iph.daddr);
+		return bpf_map_lookup_elem(&blocked_dst_v4, &daddr) != 0;
+	}
 
-	daddr = __builtin_bswap32(iph.daddr);
-	return bpf_map_lookup_elem(&blocked_dst_v4, &daddr) != 0;
+	if (ether_type == ETH_P_IPV6) {
+		if (bpf_skb_load_bytes(skb, l3_offset + 24, daddr_v6, sizeof(daddr_v6)) < 0)
+			return 0;
+
+		return bpf_map_lookup_elem(&blocked_dst_v6, daddr_v6) != 0;
+	}
+
+	return 0;
 }
 
 static __always_inline void submit_skb_event(struct __sk_buff *skb, __u8 direction, __u8 dropped)

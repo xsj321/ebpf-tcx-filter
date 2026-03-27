@@ -318,7 +318,7 @@ const dashboardHTML = `<!doctype html>
             <th>Length</th>
             <th>Count</th>
 			<th>Dropped</th>
-			<th>Action</th>
+			<th>Block</th>
             <th>Last Seen</th>
             <th>Summary</th>
           </tr>
@@ -432,7 +432,7 @@ const dashboardHTML = `<!doctype html>
 			'<td>' + escapeHTML(packet.count) + '</td>' +
 			'<td>' + escapeHTML(packet.droppedCount || 0) + '</td>' +
 			'<td>' +
-			  (packet.dstIP && !String(packet.dstIP).includes(':')
+			  (packet.dstIP
 				? '<div class="drop-switch-wrap">' +
 				    '<label class="drop-switch" title="Block this destination IP">' +
 				      '<input class="drop-switch-input" type="checkbox" data-dst="' + encodeURIComponent(packet.dstIP) + '" ' + (packet.dropEnabled ? 'checked' : '') + ' />' +
@@ -921,7 +921,7 @@ func main() {
 	defer cancelApp()
 	hub.startDNSResolvers(appCtx, 2)
 
-	server := newDashboardServer(hub, objs.BlockedDstV4)
+	server := newDashboardServer(hub, objs.BlockedDstV4, objs.BlockedDstV6)
 	go func() {
 		log.Printf("Packet dashboard listening on http://127.0.0.1:8080")
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -997,7 +997,7 @@ func main() {
 	}
 }
 
-func newDashboardServer(hub *packetHub, blockedDstV4 *ebpf.Map) *http.Server {
+func newDashboardServer(hub *packetHub, blockedDstV4, blockedDstV6 *ebpf.Map) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -1007,7 +1007,7 @@ func newDashboardServer(hub *packetHub, blockedDstV4 *ebpf.Map) *http.Server {
 		serveEvents(hub, w, r)
 	})
 	mux.HandleFunc("/drop-dstip", func(w http.ResponseWriter, r *http.Request) {
-		handleDropDstIP(hub, blockedDstV4, w, r)
+		handleDropDstIP(hub, blockedDstV4, blockedDstV6, w, r)
 	})
 
 	return &http.Server{
@@ -1066,7 +1066,7 @@ func serveEvents(hub *packetHub, w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleDropDstIP(hub *packetHub, blockedDstV4 *ebpf.Map, w http.ResponseWriter, r *http.Request) {
+func handleDropDstIP(hub *packetHub, blockedDstV4, blockedDstV6 *ebpf.Map, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1079,23 +1079,50 @@ func handleDropDstIP(hub *packetHub, blockedDstV4 *ebpf.Map, w http.ResponseWrit
 		return
 	}
 	ip := net.ParseIP(req.DstIP)
-	ipv4 := ip.To4()
-	if ipv4 == nil {
-		http.Error(w, "invalid dstIP: only IPv4 is supported for kernel dropping", http.StatusBadRequest)
+	if ip == nil {
+		http.Error(w, "invalid dstIP", http.StatusBadRequest)
 		return
 	}
 
-	key := binary.BigEndian.Uint32(ipv4)
+	if ipv4 := ip.To4(); ipv4 != nil {
+		key := binary.BigEndian.Uint32(ipv4)
+		if req.Block {
+			value := uint8(1)
+			if err := blockedDstV4.Put(key, value); err != nil {
+				http.Error(w, fmt.Sprintf("updating blocked dst IPv4 map: %s", err), http.StatusInternalServerError)
+				return
+			}
+			hub.blockDstIP(req.DstIP)
+		} else {
+			if err := blockedDstV4.Delete(key); err != nil {
+				http.Error(w, fmt.Sprintf("deleting blocked dst IPv4 key: %s", err), http.StatusInternalServerError)
+				return
+			}
+			hub.unblockDstIP(req.DstIP)
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	ipv6 := ip.To16()
+	if ipv6 == nil {
+		http.Error(w, "invalid dstIP", http.StatusBadRequest)
+		return
+	}
+
+	var key [16]byte
+	copy(key[:], ipv6)
 	if req.Block {
 		value := uint8(1)
-		if err := blockedDstV4.Put(key, value); err != nil {
-			http.Error(w, fmt.Sprintf("updating blocked dst map: %s", err), http.StatusInternalServerError)
+		if err := blockedDstV6.Put(key, value); err != nil {
+			http.Error(w, fmt.Sprintf("updating blocked dst IPv6 map: %s", err), http.StatusInternalServerError)
 			return
 		}
 		hub.blockDstIP(req.DstIP)
 	} else {
-		if err := blockedDstV4.Delete(key); err != nil {
-			http.Error(w, fmt.Sprintf("deleting blocked dst map key: %s", err), http.StatusInternalServerError)
+		if err := blockedDstV6.Delete(key); err != nil {
+			http.Error(w, fmt.Sprintf("deleting blocked dst IPv6 key: %s", err), http.StatusInternalServerError)
 			return
 		}
 		hub.unblockDstIP(req.DstIP)

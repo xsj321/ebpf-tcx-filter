@@ -75,6 +75,7 @@ type bpfProgramSpecs struct {
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
 	BlockedDstV4 *ebpf.MapSpec `ebpf:"blocked_dst_v4"`
+	BlockedDstV6 *ebpf.MapSpec `ebpf:"blocked_dst_v6"`
 	Events       *ebpf.MapSpec `ebpf:"events"`
 }
 
@@ -107,12 +108,14 @@ func (o *bpfObjects) Close() error {
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
 	BlockedDstV4 *ebpf.Map `ebpf:"blocked_dst_v4"`
+	BlockedDstV6 *ebpf.Map `ebpf:"blocked_dst_v6"`
 	Events       *ebpf.Map `ebpf:"events"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.BlockedDstV4,
+		m.BlockedDstV6,
 		m.Events,
 	)
 }
